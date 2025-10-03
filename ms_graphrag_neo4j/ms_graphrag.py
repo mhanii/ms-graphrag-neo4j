@@ -1,7 +1,7 @@
 import os
 from typing import Any, Dict, List, Optional, Type
 from neo4j import Driver
-from openai import AsyncOpenAI
+from openai import AzureOpenAI, AsyncAzureOpenAI
 import asyncio
 
 
@@ -90,7 +90,11 @@ class MsGraphRAG:
         self.model = model
         self.max_workers = max_workers
         self._database = database
-        self._openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        self._openai_client = AsyncAzureOpenAI(
+            api_version="2024-12-01-preview",
+            azure_endpoint="https://gpt5-api-resource.cognitiveservices.azure.com/",
+            api_key=os.environ.get("AZURE_API_KEY"),
+        )
         # Test for APOC
         try:
             self.query("CALL apoc.help('test')")
