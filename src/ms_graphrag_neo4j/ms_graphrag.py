@@ -1,16 +1,14 @@
 import os
 from typing import Any, Dict, List, Optional, Type
 from neo4j import Driver
-from openai import AsyncOpenAI
 import asyncio
-
-
 from tqdm.asyncio import tqdm, tqdm_asyncio
-
-
 from ms_graphrag_neo4j.cypher_queries import *
 from ms_graphrag_neo4j.utils import *
 from ms_graphrag_neo4j.prompts import *
+from ms_graphrag_neo4j.providers.openai import OpenAIProvider
+from ms_graphrag_neo4j.providers.azure import AzureProvider
+from ms_graphrag_neo4j.providers.gemini import GeminiProvider
 
 
 class MsGraphRAG:
@@ -25,21 +23,22 @@ class MsGraphRAG:
     - Entity and relationship extraction from unstructured text
     - Node and relationship summarization for improved retrieval
     - Community detection and summarization for concept clustering
-    - Integration with OpenAI models for generation
+    - Integration with different LLM providers (OpenAI, Azure, Gemini) for generation
 
-    The class connects to Neo4j for graph storage and uses OpenAI for content generation
-    and extraction, providing a seamless way to build knowledge graphs from text
-    and perform graph-based retrieval.
+    The class connects to Neo4j for graph storage and uses a specified LLM provider
+    for content generation and extraction, providing a seamless way to build
+    knowledge graphs from text and perform graph-based retrieval.
 
     Requirements:
     - Neo4j database with APOC and GDS plugins installed
-    - OpenAI API key for LLM interactions
+    - API key for the chosen LLM provider
 
     Example:
     ```
     from ms_graphrag_neo4j import MsGraphRAG
     import os
 
+    # Set up your environment variables for the chosen provider
     os.environ["OPENAI_API_KEY"]= "sk-proj-"
     os.environ["NEO4J_URI"]="bolt://localhost:7687"
     os.environ["NEO4J_USERNAME"]="neo4j"
@@ -47,7 +46,7 @@ class MsGraphRAG:
 
     from neo4j import GraphDatabase
     driver = GraphDatabase.driver(os.environ["NEO4J_URI"], auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]))
-    ms_graph = MsGraphRAG(driver=driver, model='gpt-4o')
+    ms_graph = MsGraphRAG(driver=driver, llm_provider="openai", model='gpt-4o')
 
     example_texts = ["Tomaz works for Neo4j", "Tomaz lives in Grosuplje", "Tomaz went to school in Grosuplje"]
     allowed_entities = ["Person", "Organization", "Location"]
@@ -66,31 +65,41 @@ class MsGraphRAG:
     def __init__(
         self,
         driver: Driver,
+        llm_provider: str,
         model: str = "gpt-4o",
         database: str = "neo4j",
         max_workers: int = 10,
         create_constraints: bool = True,
+        **kwargs,
     ) -> None:
         """
-        Initialize MsGraphRAG with Neo4j driver and LLM.
+        Initialize MsGraphRAG with Neo4j driver and LLM provider.
 
         Args:
-            driver (Driver): Neo4j driver instance
+            driver (Driver): Neo4j driver instance.
+            llm_provider (str): The LLM provider to use ('openai', 'azure', or 'gemini').
             model (str, optional): The language model to use. Defaults to "gpt-4o".
             database (str, optional): Neo4j database name. Defaults to "neo4j".
             max_workers (int, optional): Maximum number of concurrent workers. Defaults to 10.
             create_constraints (bool, optional): Whether to create database constraints. Defaults to True.
+            **kwargs: Additional keyword arguments for the LLM provider.
         """
-        if not os.environ.get("OPENAI_API_KEY"):
-            raise ValueError(
-                "You need to define the `OPENAI_API_KEY` environment variable"
-            )
-
         self._driver = driver
         self.model = model
         self.max_workers = max_workers
         self._database = database
-        self._openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+        providers = {
+            "openai": OpenAIProvider,
+            "azure": AzureProvider,
+            "gemini": GeminiProvider,
+        }
+        provider_class = providers.get(llm_provider)
+        if not provider_class:
+            raise ValueError(f"Unsupported LLM provider: {llm_provider}")
+
+        self._llm_provider = provider_class(model=model, **kwargs)
+
         # Test for APOC
         try:
             self.query("CALL apoc.help('test')")
@@ -434,13 +443,23 @@ class MsGraphRAG:
             result = session.run(Query(text=query, timeout=self.timeout), params)
             return [r.data() for r in result]
 
-    async def achat(self, messages, model="gpt-4o", config={}):
-        response = await self._openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **config,
+    async def achat(self, messages, model=None, config={}):
+        """
+        Asynchronously sends a chat request to the configured LLM provider.
+
+        Args:
+            messages (list): A list of message dictionaries to send to the chat model.
+            model (str, optional): The specific model to use for this request.
+                                   If None, the default model of the provider is used.
+            config (dict, optional): Additional configuration for the chat completion.
+
+        Returns:
+            The response content from the LLM.
+        """
+        model_to_use = model or self.model
+        return await self._llm_provider.achat(
+            messages, model=model_to_use, config=config
         )
-        return response.choices[0].message
 
     def close(self) -> None:
         """
